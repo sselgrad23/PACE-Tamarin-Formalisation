@@ -1,0 +1,222 @@
+theory P5ab
+begin
+
+builtins: 
+  symmetric-encryption,
+  hashing, // Gives hash function h
+  diffie-hellman
+
+functions:
+  kdf/3, // User-defined function for kdf
+  map/2 // User-defined hash function
+
+/*** Key Infratructure ***/
+rule Register_Key:
+  [ Fr(~k) ] // Fresh key
+--[ Register_Key($A, $B, ~k)]->
+  [ !Ltk($A, $B, ~k) 
+  ]
+
+// Ltk is revealed because A is compromised
+rule Reveal_ltk_A:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(A) ]-> 
+  [ Out(ltk) ]
+
+// Ltk is revealed because B is compromised
+rule Reveal_ltk_B:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(B) ]-> 
+  [ Out(ltk) ]
+
+/*** Formalise Protocol P5ab ***
+ * Kab = h(g^(xy))
+ * 1. A -> B: g^x, [s]h(k(A, B)), p
+ * 2. B -> A: g^y
+ * 3. A -> B: [g^y]Kab
+ * 4. B -> A: [g^x]Kab
+ */
+
+// Initialise thread for initiator role
+rule Init_A:
+  [ Fr(~id) // Fresh id for A
+  , !Ltk(A, B, ltk) // Only 1 persistant long-term key
+  ]
+--[ Create_A(A, ~id) ]->
+  [ St_A_1(A, ~id, ltk, B)
+  ]
+
+// Initialise thread for responder role
+rule Init_B:
+  [ Fr(~id) // Fresh id for B
+  , !Ltk(A, B, ltk) // Only 1 persistant long-term key
+  ]
+--[ Create_B(B, ~id) ]->
+  [ St_B_1(B, ~id, ltk, A)
+  ]
+
+// Step 1.1: A sends g^x to B
+rule A_1_send:
+  let g = map(~s, $p)
+      m = <'INITIATOR', g^~x, senc(~s, h(ltk)), $p>
+  in
+  [ St_A_1(A, id, ltk, B) 
+  , Fr(~x) // Fresh nonce x
+  , Fr(~s) // Fresh nonce s, used for key derivation
+  ]
+--[ Send(A, m) ]-> // A sends g^x, [s]h(k(A, B))
+  [ St_A_2(A, id, ltk, B, ~x, ~s, $p) 
+  , Out(m)
+  ]
+
+// Step 1.2: B receives g^x from A
+rule B_1_receive:
+  let g = map(s, p)
+      m = <'INITIATOR', gx, senc(s, h(ltk)), p>
+  in
+  [ St_B_1(B, id, ltk, A)
+  , In(m)
+  ]
+--[ Recv(B, m) // B receives g^x, [s]h(k(A, B))
+  ]->
+  [ St_B_2(B, id, ltk, A, gx, s, p)
+  ]
+
+
+// Step 2.1: B sends g^y to A
+rule B_2_send:
+  let g = map(s, p)
+      Kab = h(gx^~y)
+  in
+  [ St_B_2(B, id, ltk, A, gx, s, p)
+  , Fr(~y) // Fresh nonce y
+  ]
+--[ Send(B, <'RESPONDER', g^~y>) // B sends g^y
+  , Running(B, A, <'I', 'R', gx, g^~y, Kab>) 
+  ]->
+  [ St_B_3(B, id, ltk, A, gx, s, p, ~y, Kab)
+  , Out(<'RESPONDER', g^~y>)
+  ]
+
+// Step 2.2: A receives g^y from B
+rule A_3_receive:
+  let g = map(s, p)
+      Kab = h(gy^x)
+  in
+  [ St_A_2(A, id, ltk, B, x, s, p)
+  , In(<'RESPONDER', gy>)
+  ]
+--[ Recv(A, <'RESPONDER', gy>) // A receives g^y
+  , Running(A, B, <'R', 'I', g^x, gy, Kab>)
+  ]->
+  [ St_A_3(A, id, ltk, B, x, s, p, gy, Kab)
+  ]
+
+// Step 3.1: A sends MAC'd half-key back to B
+rule A_4_send:
+  let g = map(s, p)
+      m = senc(<'INITIATOR', gy>, Kab)
+  in
+  [ St_A_3(A, id, ltk, B, x, s, p, gy, Kab)
+  ]
+--[ Send(A, m) ]-> // A sends [g^y]Kab
+  [ St_A_4(A, id, ltk, B, x, s, p, gy, Kab)
+  , Out(m)
+  ]
+
+// Step 3.2: B receives MAC'd half-key from A
+rule B_3_receive:
+  let g = map(s, p)
+      m = senc(<'INITIATOR', g^y>, Kab)
+  in
+  [ St_B_3(B, id, ltk, A, gx, s, p, y, Kab) 
+  , In(m)
+  ]
+--[ Rcv(B, m) 
+  ]->
+  [ St_B_4(B, id, ltk, A, gx, s, p, y, Kab) 
+  ]
+
+// Step 4.1: B sends MAC'd half-key to A
+rule B_4_send:
+  let g = map(s, p)
+      m = senc(<'RESPONDER', gx>,  Kab)
+  in
+  [ St_B_4(B, id, ltk, A, gx, s, p, y, Kab)
+  ]
+--[ Send(B, m)  // B sends [g^x]Kab
+  , Commit(B, A, <'R', 'I', gx, g^y, Kab>)
+  , Secret(B, Kab)
+  , Honest(A)
+  , Honest(B)
+  , Finish(B, A, 'R')
+  ]->
+  [ St_B_5(B, id, ltk, A, gx, s, p, y, Kab)
+  , Out(m)
+  ]
+
+// Step 4.2: A receives MAC'd half-key from B
+rule A_5_receive:
+  let g = map(s, p)
+      m = senc(<'RESPONDER', g^x>, Kab)
+  in
+  [ St_A_4(A, id, ltk, B, x, s, p, gy, Kab)
+  , In(m)
+  ]
+--[ Recv(A, m)
+  , Commit(A, B, <'I', 'R', g^x, gy, Kab>)
+  , Secret(A, Kab)
+  , Honest(A)
+  , Honest(B)
+  , Finish(A, B, 'I')
+  ]->
+  [ St_A_5(A, id, ltk, B, x, s, p, gy, Kab)
+  ]
+
+/*** Lemmas ***/
+// Find intended execution trace - VERIFIES
+lemma executable:
+  exists-trace
+    "Ex a b #i #j. 
+      Finish(a, b, 'I') @i
+      & Finish(b, a, 'R') @j
+      // Only one instance of each agent
+      & (All c d id1 id2 #k #l. Create_A(c, id1) @k & Create_A(d, id2) @l ==> id1 = id2)
+      & (All e f id3 id4 #m #n. Create_B(e, id3) @m & Create_B(f, id4) @n ==> id3 = id4)
+      // No agents are compromised
+      & not(Ex X #o. Reveal(X) @o)
+    "
+
+// A agrees with B on g^x, g^y and Kab - VERIFIES
+lemma injectiveagreementINITIATOR:
+  "All a b t u v #i. 
+    Commit(a,b,<'I','R',t, u, v>) @i
+    ==> (Ex #j. Running(b,a,<'I','R',t, u, v>) @j 
+        & not (Ex a2 b2 #i2. Commit(a2,b2,<'I','R',t, u, v>) @i2
+                           & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// B agrees with A on g^x, g^y and Kab - VERIFIES
+lemma injectiveagreementRESPONDER:
+  "All a b t u v #i. 
+    Commit(a,b,<'R','I',t, u, v>) @i
+    ==> (Ex #j. Running(b,a,<'R','I',t, u, v>) @j 
+              & not (Ex a2 b2 #i2. Commit(a2,b2,<'R','I',t, u, v>) @i2
+                                 & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// Kab remains secret - VERIFIES
+lemma secrecy:
+  "All A x #i. 
+    Secret(A,x) @i ==> 
+    not (Ex #j. K(x)@j)
+        | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// Perfect forward secrecy for Kab - VERIFIES
+lemma secrecy_PFS:
+  "All A x #i. 
+    Secret(A,x) @i ==> 
+    not (Ex #j. K(x)@j)
+        | (Ex X #r. Reveal(X)@r & Honest(X) @i & r < i)"
+
+end

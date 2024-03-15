@@ -1,0 +1,189 @@
+theory P2b
+begin
+
+builtins: symmetric-encryption
+
+/*** Key Infratructure ***/
+rule Register_Key:
+  [ Fr(~k) ] // Fresh key
+--[ Register_Key($A, $B, ~k)]->
+  [ !Ltk($A, $B, ~k) 
+  ]
+
+// Ltk is revealed because A is compromised
+rule Reveal_ltk_A:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(A) ]-> 
+  [ Out(ltk) ]
+
+// Ltk is revealed because B is compromised
+rule Reveal_ltk_B:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(B) ]-> 
+  [ Out(ltk) ]
+
+/*** Formalise Protocol P2b ***
+ * 1. A -> B: x
+ * 2. B -> A: y
+ * 3. A -> B: [x, y]k(A, B)
+ * 4. B -> A: [x, y]k(B, A)
+ */
+
+// Initialise thread for initiator
+rule Init_A:
+  [ Fr(~id) // Fresh id for A
+  , !Ltk(A, B, ltkAB) // Persistant long-term key A->B
+  , !Ltk(B, A, ltkBA) // Persistant long-term key B->A
+  ]
+--[ Create_A(A, ~id) ]->
+  [ St_A_1(A, ~id, ltkAB, ltkBA, B)
+  ]
+
+// Initialise thread for responder
+rule Init_B:
+  [ Fr(~id) // Fresh id for B
+  , !Ltk(B, A, ltkBA) // Persistant long-term key B->A
+  , !Ltk(A, B, ltkAB) // Persistant long-term key A->B
+  ]
+--[ Create_B(B, ~id) ]->
+  [ St_B_1(B, ~id, ltkBA, ltkAB, A)
+  ]
+
+// Step 1.1: A sends nonce x to B
+rule A_1_send:
+  [ St_A_1(A, id, ltkAB, ltkBA, B) 
+  , Fr(~x) // Fresh nonce x
+  ]
+--[ Send(A, <'INITIATOR', ~x>) ]-> // A sends x
+  [ St_A_2(A, id, ltkAB, ltkBA, B, ~x) 
+  , Out(<'INITIATOR', ~x>)
+  ]
+
+// Step 1.2: B receives nonce x from A
+rule B_1_receive:
+  [ St_B_1(B, id, ltkBA, ltkAB, A)
+  , In(<'INITIATOR', x>)
+  ]
+--[ Recv(B, <'INITIATOR', x>) // B receives x
+  ]->
+  [ St_B_2(B, id, ltkBA, ltkAB, A, x)
+  ]
+
+// Step 2.1: B sends nonce y to A
+rule B_2_send:
+  [ St_B_2(B, id, ltkBA, ltkAB, A, x)
+  , Fr(~y) // Fresh nonce y
+  ]
+--[ Send(B, <'RESPONDER', ~y>) // B sends y
+  , Running(B, A, <'I', 'R', x, ~y>) 
+  ]->
+  [ St_B_3(B, id, ltkBA, ltkAB, A, x, ~y)
+  , Out(<'RESPONDER', ~y>)
+  ]
+
+// Step 2.2: A receives nonce y from B
+rule A_3_receive:
+  [ St_A_2(A, id, ltkAB, ltkBA, B, x)
+  , In(<'RESPONDER', y>)
+  ]
+--[ Recv(A, <'RESPONDER', y>) // A receives y
+  , Running(A, B, <'R', 'I', x, y>)
+  ]->
+  [ St_A_3(A, id, ltkAB, ltkBA, B, x, y)
+  ]
+
+// Step 3.1: A sends MAC'd nonces back to B
+rule A_4_send:
+  let m = <'INITIATOR', senc(<x, y>, ltkAB)>
+  in
+  [ St_A_3(A, id, ltkAB, ltkBA, B, x, y)
+  ]
+--[ Send(A, m) ]-> // A sends [x, y]k(A, B)
+  [ St_A_4(A, id, ltkAB, ltkBA, B, x, y)
+  , Out(m)
+  ]
+
+// Step 3.2: B receives MAC'd nonces from A
+rule B_3_receive:
+  let m = <'INITIATOR', senc(<x, y>, ltkAB)>
+  in
+  [ St_B_3(B, id, ltkBA, ltkAB, A, x, y) 
+  , In(m)
+  ]
+--[ Rcv(B, m) 
+  ]->
+  [ St_B_4(B, id, ltkBA, ltkAB, A, x, y) 
+  ]
+
+// Step 4.1: B sends MAC'd nonces to A
+rule B_4_send:
+  let m = <'RESPONDER', senc(<x,y>,  ltkBA)>
+  in
+  [ St_B_4(B, id, ltkBA, ltkAB, A, x, y)
+  ]
+--[ Send(B, m)  // B sends [x, y]k(B, A)
+  , Commit(B, A, <'R', 'I', x, y>)
+  , Honest(A)
+  , Honest(B)
+  , Finish(B, A, 'R')
+  ]->
+  [ St_B_5(B, id, ltkBA, ltkAB, A, x, y)
+  , Out(m)
+  ]
+
+// Step 4.2: A receives MAC'd nonces from B
+rule A_5_receive:
+  let m = <'RESPONDER', senc(<x, y>, ltkBA)>
+  in
+  [ St_A_4(A, id, ltkAB, ltkBA, B, x, y)
+  , In(m)
+  ]
+--[ Recv(A, m)
+  , Commit(A, B, <'I', 'R', x, y>)
+  , Honest(A)
+  , Honest(B)
+  , Finish(A, B, 'I')
+  ]->
+  [ St_A_5(A, id, ltkAB, ltkBA, B, x, y)
+  ]
+
+/*** Restrictions ***/
+restriction unidirectional_key:
+  "All a b k1 k2 #i #j.
+    Register_Key(a, b, k1) @i & Register_Key(b, a, k2) @j ==> not(k1 = k2)
+  "
+
+/*** Lemmas ***/
+// Find intended execution trace - VERIFIES
+lemma executable:
+  exists-trace
+    "Ex a b #i #j. 
+      Finish(a, b, 'I') @i
+      & Finish(b, a, 'R') @j
+      // Only one instance of each agent
+      & (All c d id1 id2 #k #l. Create_A(c, id1) @k & Create_A(d, id2) @l ==> id1 = id2)
+      & (All e f id3 id4 #m #n. Create_B(e, id3) @m & Create_B(f, id4) @n ==> id3 = id4)
+      // No agents are compromised
+      & not(Ex X #o. Reveal(X) @o)
+    "
+
+// A agrees with B on x and y - VERIFIES
+lemma injectiveagreementINITIATOR:
+  "All a b t u #i. 
+    Commit(a,b,<'I','R',t, u>) @i
+    ==> (Ex #j. Running(b,a,<'I','R',t, u>) @j 
+        & not (Ex a2 b2 #i2. Commit(a2,b2,<'I','R',t, u>) @i2
+                           & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// B agrees with A on x and y - VERIFIES
+lemma injectiveagreementRESPONDER:
+  "All a b t u #i. 
+    Commit(a,b,<'R','I',t, u>) @i
+    ==> (Ex #j. Running(b,a,<'R','I',t, u>) @j 
+              & not (Ex a2 b2 #i2. Commit(a2,b2,<'R','I',t, u>) @i2
+                                 & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+
+end

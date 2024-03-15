@@ -1,0 +1,134 @@
+theory P1 
+begin
+
+builtins: symmetric-encryption
+
+// Key infrastructure
+rule Register_Key:
+    [ Fr(~k) ] // Fresh key
+--[ Register_Key($B, $A, ~k)]->
+    [ !Ltk($B, $A, ~k) 
+    ]
+
+// Ltk is revealed because A is compromised
+rule Reveal_ltk_A:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(A) ]-> 
+  [ Out(ltk) ]
+
+// Ltk is revealed because B is compromised
+rule Reveal_ltk_B:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(B) ]-> 
+  [ Out(ltk) ]
+
+/* Formalise protocol P1
+    1. A -> B: x
+    2. A <- B: {x}k(A, B)
+  }
+*/
+
+// Initialise thread for initiator role
+rule Init_A:
+  [ Fr(~id) // Fresh id for A
+  , !Ltk(B, A, ltkBA) // Persistant long-term key B->A
+  ]
+--[ Create_A(A, ~id) ]->
+  [ St_A_1(A, ~id, ltkBA, B)
+  ]
+
+// Initialise thread for responder role
+rule Init_B:
+  [ Fr(~id) // Fresh id for B
+  , !Ltk(B, A, ltkBA) // Persistant long-term key B->A
+  ]
+--[ Create_B(B, ~id) ]->
+  [ St_B_1(B, ~id, ltkBA, A)
+  ]
+
+// Step 1.1: A sends nonce x to B
+rule A_1_send:
+  [ St_A_1(A, id, ltkBA, B) 
+  , Fr(~x) // Fresh nonce x
+  ]
+--[ Send(A, ~x) 
+  , Running(A, B, <'R', 'I', ~x>)
+  ]->
+  [ St_A_2(A, id, ltkBA, B, ~x) 
+  , Out(~x)
+  ]
+
+// Step 1.2: B receives nonce x from A
+rule B_1_receive:
+  [ St_B_1(B, id, ltkBA, A)
+  , In(x)
+  ]
+--[ Recv(B, x)
+  , Running(B, A, <'I', 'R', x>)
+  ]->
+  [ St_B_2(B, id, ltkBA, A, x)
+  ]
+
+// Step 2.1: B sends MAC'd nonce to A
+rule B_2_send:
+  let mB2 = senc(x, ltkBA)
+  in
+  [ St_B_2(B, id, ltkBA, A, x)
+  ]
+--[ Send(B, mB2) 
+  , Commit(B, A, <'R', 'I', x>)
+  ]->
+  [ St_B_3(B, id, ltkBA, A, x)
+  , Out(mB2)
+  ]
+
+// Step 2.2: A receives MAC'd nonce from B
+rule A_2_receive:
+  let mA2 = senc(x, ltkBA)
+  in
+  [ St_A_2(A, id, ltkBA, B, x) 
+  , In(mA2)
+  ]
+--[ Rcv(A, mA2) 
+  , Commit(A, B, <'I', 'R', x>)
+  , Honest(A)
+  , Honest(B)
+  , Finish()
+  ]->
+  [ St_A_3(A, id, ltkBA, B, x) 
+  ]
+
+/*** Restrictions ***/
+// A key registered for agent a -> agent b cannot be the same as a key for
+// agent b -> agent a.
+restriction unidirectional_key:
+  "All a b k1 k2 #i #j.
+    Register_Key(a, b, k1) @i & Register_Key(b, a, k2) @j ==> not(k1 = k2)
+  "
+
+/** Lemmas ***/
+// The expected execution trace is found - VERFIES
+lemma executable:
+  exists-trace
+    "Ex #i. Finish() @i
+    "
+
+// A injectively agrees with B on the nonce x - VERIFIES
+lemma injectiveagreementINITIATOR:
+  "All a b t #i. 
+    Commit(a,b,<'I','R',t>) @i
+    ==> (Ex #j. Running(b,a,<'I','R',t>) @j 
+        & not (Ex a2 b2 #i2. Commit(a2,b2,<'I','R',t>) @i2
+                           & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// B injectively agrees with A on the nonce x - FALSIFIES
+lemma injectiveagreementRESPONDER:
+  "All a b t #i. 
+    Commit(a,b,<'R','I',t>) @i
+    ==> (Ex #j. Running(b,a,<'R','I',t>) @j 
+              & not (Ex a2 b2 #i2. Commit(a2,b2,<'R','I',t>) @i2
+                                 & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+end

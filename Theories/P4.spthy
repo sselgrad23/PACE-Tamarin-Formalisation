@@ -1,0 +1,205 @@
+theory P4
+begin
+
+builtins: 
+  symmetric-encryption,
+  hashing // Gives hash function h
+
+functions:
+  kdf/3 // User-defined function for kdf
+
+/*** Key Infratructure ***/
+rule Register_Key:
+  [ Fr(~k) ] // Fresh key
+--[ Register_Key($A, $B, ~k)]->
+  [ !Ltk($A, $B, ~k) 
+  ]
+
+// Ltk is revealed because A is compromised
+rule Reveal_ltk_A:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(A) ]-> 
+  [ Out(ltk) ]
+
+// Ltk is revealed because B is compromised
+rule Reveal_ltk_B:
+  [ !Ltk(B, A, ltk) ] 
+--[ Reveal(B) ]-> 
+  [ Out(ltk) ]
+
+/*** Formalise Protocol P4 ***
+ * Kab = kdf(s, x, y)
+ * 1. A -> B: x, [s]h(k(A, B))
+ * 2. B -> A: y
+ * 3. A -> B: [y]Kab
+ * 4. B -> A: [x]Kab
+ */
+
+// Initialise thread for initiator role
+rule Init_A:
+  [ Fr(~id) // Fresh id for A
+  , !Ltk(A, B, ltk) // Only 1 persistant long-term key
+  ]
+--[ Create_A(A, ~id) ]->
+  [ St_A_1(A, ~id, ltk, B)
+  ]
+
+// Initialise thread for responder role
+rule Init_B:
+  [ Fr(~id) // Fresh id for B
+  , !Ltk(A, B, ltk) // Only 1 persistant long-term key
+  ]
+--[ Create_B(B, ~id) ]->
+  [ St_B_1(B, ~id, ltk, A)
+  ]
+
+// Step 1.1: A sends nonces x and s to B
+rule A_1_send:
+  let m = <'INITIATOR', ~x, senc(~s, h(ltk))>
+  in
+  [ St_A_1(A, id, ltk, B) 
+  , Fr(~x) // Fresh nonce x
+  , Fr(~s) // Fresh nonce s, used for key derivation
+  ]
+--[ Send(A, m) ]-> // A sends x, [s]h(k(A, B))
+  [ St_A_2(A, id, ltk, B, ~x, ~s) 
+  , Out(m)
+  ]
+
+// Step 1.2: B receives nonces x and s from A
+rule B_1_receive:
+  let m = <'INITIATOR', x, senc(s, h(ltk))>
+  in
+  [ St_B_1(B, id, ltk, A)
+  , In(m)
+  ]
+--[ Recv(B, m) // B receives x, [s]h(k(A, B))
+  ]->
+  [ St_B_2(B, id, ltk, A, x, s)
+  ]
+
+// Step 2.1: B sends nonce y to A
+rule B_2_send:
+  let Kab = kdf(s, x, ~y)
+  in
+  [ St_B_2(B, id, ltk, A, x, s)
+  , Fr(~y) // Fresh nonce y
+  ]
+--[ Send(B, <'RESPONDER', ~y>) // B sends y
+  , Running(B, A, <'I', 'R', x, ~y, Kab>) 
+  ]->
+  [ St_B_3(B, id, ltk, A, x, s, ~y, Kab)
+  , Out(<'RESPONDER', ~y>)
+  ]
+
+// Step 2.2: A receives nonce y from B
+rule A_3_receive:
+  let Kab = kdf(s, x, y)
+  in
+  [ St_A_2(A, id, ltk, B, x, s)
+  , In(<'RESPONDER', y>)
+  ]
+--[ Recv(A, <'RESPONDER', y>) // A receives y
+  , Running(A, B, <'R', 'I', x, y, Kab>)
+  ]->
+  [ St_A_3(A, id, ltk, B, x, s, y, Kab)
+  ]
+
+// Step 3.1: A sends MAC'd nonce back to B
+rule A_4_send:
+  let m = senc(<'INITIATOR', y>, Kab)
+  in
+  [ St_A_3(A, id, ltk, B, x, s, y, Kab)
+  ]
+--[ Send(A, m) ]-> // A sends [y]Kab
+  [ St_A_4(A, id, ltk, B, x, s, y, Kab)
+  , Out(m)
+  ]
+
+// Step 3.2: B receives MAC'd nonce from A
+rule B_3_receive:
+  let m = senc(<'INITIATOR', y>, Kab)
+  in
+  [ St_B_3(B, id, ltk, A, x, s, y, Kab) 
+  , In(m)
+  ]
+--[ Rcv(B, m) 
+  ]->
+  [ St_B_4(B, id, ltk, A, x, s, y, Kab) 
+  ]
+
+// Step 4.1: B sends MAC'd nonce to A
+rule B_4_send:
+  let m = senc(<'RESPONDER', x>,  Kab)
+  in
+  [ St_B_4(B, id, ltk, A, x, s, y, Kab)
+  ]
+--[ Send(B, m)  // B sends [x]Kab
+  , Commit(B, A, <'R', 'I', x, y, Kab>)
+  , Secret(B, Kab)
+  , Honest(A)
+  , Honest(B)
+  , Finish(B, A, 'R')
+  ]->
+  [ St_B_5(B, id, ltk, A, x, s, y, Kab)
+  , Out(m)
+  ]
+
+// Step 4.2: A receives MAC'd nonce from B
+rule A_5_receive:
+  let m = senc(<'RESPONDER', x>, Kab)
+  in
+  [ St_A_4(A, id, ltk, B, x, s, y, Kab)
+  , In(m)
+  ]
+--[ Recv(A, m)
+  , Commit(A, B, <'I', 'R', x, y, Kab>)
+  , Secret(A, Kab)
+  , Honest(A)
+  , Honest(B)
+  , Finish(A, B, 'I')
+  ]->
+  [ St_A_5(A, id, ltk, B, x, s, y, Kab)
+  ]
+
+/*** Lemmas ***/
+// Find intended execution trace - VERIFIES
+lemma executable:
+  exists-trace
+    "Ex a b #i #j. 
+      Finish(a, b, 'I') @i
+      & Finish(b, a, 'R') @j
+      // Only one instance of each agent
+      & (All c d id1 id2 #k #l. Create_A(c, id1) @k & Create_A(d, id2) @l ==> id1 = id2)
+      & (All e f id3 id4 #m #n. Create_B(e, id3) @m & Create_B(f, id4) @n ==> id3 = id4)
+      // No agents are compromised
+      & not(Ex X #o. Reveal(X) @o)
+    "
+
+// A agrees with B on x, y and Kab - VERIFIES
+lemma injectiveagreementINITIATOR:
+  "All a b t u v #i. 
+    Commit(a,b,<'I','R',t, u, v>) @i
+    ==> (Ex #j. Running(b,a,<'I','R',t, u, v>) @j 
+        & not (Ex a2 b2 #i2. Commit(a2,b2,<'I','R',t, u, v>) @i2
+                           & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// B agrees with A on x, y and Kab - VERIFIES
+lemma injectiveagreementRESPONDER:
+  "All a b t u v #i. 
+    Commit(a,b,<'R','I',t, u, v>) @i
+    ==> (Ex #j. Running(b,a,<'R','I',t, u, v>) @j 
+              & not (Ex a2 b2 #i2. Commit(a2,b2,<'R','I',t, u, v>) @i2
+                                 & not (#i2 = #i)))
+              | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+// Kab remains secret - VERIFIES
+lemma secrecy:
+  "All A x #i. 
+    Secret(A,x) @i ==> 
+    not (Ex #j. K(x)@j)
+        | (Ex X #r. Reveal(X)@r & Honest(X) @i)"
+
+
+end
